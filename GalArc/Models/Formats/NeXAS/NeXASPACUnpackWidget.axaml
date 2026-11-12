@@ -2,7 +2,6 @@
              xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
-             xmlns:i="using:GalArc.I18n"
              xmlns:local="using:GalArc.Models.Formats.NeXAS"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              d:DesignHeight="450"
@@ -15,10 +14,21 @@
     </Design.DataContext>
 
     <StackPanel Spacing="10">
-        <TextBlock Text="{x:Static i:GuiStrings.Encoding}" />
+        <TextBlock Text="檔名編碼" />
         <ComboBox HorizontalAlignment="Stretch"
                   ItemsSource="{Binding Encodings}"
                   SelectedItem="{Binding Encoding}">
+            <ComboBox.ItemTemplate>
+                <DataTemplate>
+                    <TextBlock Text="{Binding EncodingName}" />
+                </DataTemplate>
+            </ComboBox.ItemTemplate>
+        </ComboBox>
+
+        <TextBlock Text="劇本文字編碼" />
+        <ComboBox HorizontalAlignment="Stretch"
+                  ItemsSource="{Binding Encodings}"
+                  SelectedItem="{Binding ScriptEncoding}">
             <ComboBox.ItemTemplate>
                 <DataTemplate>
                     <TextBlock Text="{Binding EncodingName}" />

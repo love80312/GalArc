@@ -59,15 +59,16 @@ internal class PAC : ArcFormat, IUnpackConfigurable, IPackConfigurable
         }
 
         Directory.CreateDirectory(folderPath);
-        Encoding selectedEncoding = (_unpackOptions ??= new NeXASPACUnpackOptions()).Encoding
-            ?? NeXASEncodings.Default;
+        NeXASPACUnpackOptions unpackOptions = _unpackOptions ??= new NeXASPACUnpackOptions();
+        Encoding selectedEncoding = unpackOptions.Encoding ?? NeXASEncodings.Default;
+        Encoding scriptEncoding = unpackOptions.ScriptEncoding ?? NeXASEncodings.Default;
 
         // Byte 3 is reserved. Modern PACs store the entry count at byte 4.
         stream.Position = 4;
         uint countValue = reader.ReadUInt32();
         if (countValue == 0 || countValue >= 0x10000 || countValue > int.MaxValue)
         {
-            UnpackLegacy(reader, folderPath, selectedEncoding);
+            UnpackLegacy(reader, folderPath, selectedEncoding, scriptEncoding);
             return;
         }
 
@@ -78,6 +79,7 @@ internal class PAC : ArcFormat, IUnpackConfigurable, IPackConfigurable
         Logger.Info("NeXAS PAC: {0} entries, compression method {1}.", fileCount, methodValue);
 
         List<PackedEntry> entries = ReadIndex(reader, fileCount, selectedEncoding);
+        WriteEntryOrder(folderPath, entries);
         ProgressManager.SetMax(entries.Count);
 
         for (int i = 0; i < entries.Count; i++)
@@ -90,7 +92,7 @@ internal class PAC : ArcFormat, IUnpackConfigurable, IPackConfigurable
             string outputPath = GetOutputPath(folderPath, entry.Path);
             Directory.CreateDirectory(Path.GetDirectoryName(outputPath));
             File.WriteAllBytes(outputPath, data);
-            TryExtractScript(outputPath, entry.Name, data, selectedEncoding);
+            TryExtractScript(folderPath, i, entry.Name, data, scriptEncoding);
 
             ProgressManager.Progress();
         }
@@ -413,7 +415,12 @@ internal class PAC : ArcFormat, IUnpackConfigurable, IPackConfigurable
         return data;
     }
 
-    private static void TryExtractScript(string filePath, string entryName, byte[] data, Encoding encoding)
+    private static void TryExtractScript(
+        string folderPath,
+        int entryIndex,
+        string entryName,
+        byte[] data,
+        Encoding textEncoding)
     {
         string extension = Path.GetExtension(entryName);
         if (!extension.Equals(".bin", StringComparison.OrdinalIgnoreCase)
@@ -422,12 +429,17 @@ internal class PAC : ArcFormat, IUnpackConfigurable, IPackConfigurable
             return;
         }
 
-        string scriptFolder = filePath + ".script";
+        string textRoot = Path.Combine(folderPath, "_text");
+        string textPath = Path.Combine(textRoot, $"{entryIndex:D4}.txt");
         try
         {
-            if (NeXASScriptReader.TryExtract(data, scriptFolder, encoding, out int segmentCount))
+            if (NeXASScriptReader.TryExtract(data, textPath, textEncoding, out int segmentCount, out string reason))
             {
-                Logger.Info("Readable script exported: {0} ({1} segments).", entryName, segmentCount);
+                Logger.Info("Plain text exported: {0} ({1} segments).", textPath, segmentCount);
+            }
+            else
+            {
+                Logger.Info("Text export skipped: {0}. {1}", entryName, reason);
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
@@ -437,7 +449,7 @@ internal class PAC : ArcFormat, IUnpackConfigurable, IPackConfigurable
         }
     }
 
-    private static void UnpackLegacy(BinaryReader reader, string folderPath, Encoding encoding)
+    private static void UnpackLegacy(BinaryReader reader, string folderPath, Encoding encoding, Encoding scriptEncoding)
     {
         Stream stream = reader.BaseStream;
         stream.Position = 3;
@@ -493,7 +505,9 @@ internal class PAC : ArcFormat, IUnpackConfigurable, IPackConfigurable
             throw new InvalidArchiveException("Legacy PAC contains no entries.");
         }
 
+        WriteEntryOrder(folderPath, entries);
         ProgressManager.SetMax(entries.Count);
+        int entryIndex = 0;
         foreach (Entry entry in entries)
         {
             stream.Position = entry.Offset;
@@ -508,12 +522,85 @@ internal class PAC : ArcFormat, IUnpackConfigurable, IPackConfigurable
             string outputPath = GetOutputPath(folderPath, entry.Path);
             Directory.CreateDirectory(Path.GetDirectoryName(outputPath));
             File.WriteAllBytes(outputPath, data);
-            TryExtractScript(outputPath, entry.Name, data, encoding);
+            TryExtractScript(folderPath, entryIndex, entry.Name, data, scriptEncoding);
+            entryIndex++;
             ProgressManager.Progress();
         }
 
         Logger.ShowVersion("pac", "legacy");
         Logger.Info("Legacy NeXAS PAC extraction completed: {0} files.", entries.Count);
+    }
+
+    private static void WriteEntryOrder(string folderPath, IEnumerable<Entry> entries)
+    {
+        string textDirectory = Path.Combine(folderPath, "_text");
+        Directory.CreateDirectory(textDirectory);
+        string orderPath = Path.Combine(textDirectory, "_entries.lst");
+        using StreamWriter writer = new(orderPath, false, new UTF8Encoding(false));
+        int index = 0;
+        foreach (Entry entry in entries)
+        {
+            writer.Write(index.ToString("D4", System.Globalization.CultureInfo.InvariantCulture));
+            writer.Write('\t');
+            writer.WriteLine(Path.GetFileName(entry.Path));
+            index++;
+        }
+    }
+
+    private static string[] GetOrderedFiles(string folderPath, out Dictionary<string, int> entryIndices)
+    {
+        string[] files = Directory.GetFiles(folderPath, "*", SearchOption.TopDirectoryOnly);
+        string orderPath = Path.Combine(folderPath, "_text", "_entries.lst");
+        entryIndices = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        if (!File.Exists(orderPath))
+        {
+            return files;
+        }
+
+        List<string> ordered = new(files.Length);
+        HashSet<string> used = new(StringComparer.OrdinalIgnoreCase);
+        foreach (string line in File.ReadAllLines(orderPath, new UTF8Encoding(false, true)))
+        {
+            int separator = line.IndexOf('\t');
+            if (separator <= 0 || separator == line.Length - 1)
+            {
+                continue;
+            }
+
+            if (!int.TryParse(
+                line.AsSpan(0, separator),
+                System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out int index))
+            {
+                continue;
+            }
+
+            string name = line[(separator + 1)..];
+            entryIndices[name] = index;
+            foreach (string file in files)
+            {
+                if (string.Equals(Path.GetFileName(file), name, StringComparison.OrdinalIgnoreCase)
+                    && used.Add(file))
+                {
+                    ordered.Add(file);
+                    break;
+                }
+            }
+        }
+
+        // Newly added files are appended after original PAC entries and have no translation sidecar.
+        int nextIndex = entryIndices.Count;
+        foreach (string file in files)
+        {
+            if (used.Add(file))
+            {
+                ordered.Add(file);
+                entryIndices[Path.GetFileName(file)] = nextIndex++;
+            }
+        }
+
+        return ordered.ToArray();
     }
 
     private static byte[] ReadExactly(BinaryReader reader, int count)
@@ -639,7 +726,9 @@ internal class PAC : ArcFormat, IUnpackConfigurable, IPackConfigurable
     public override void Pack(string folderPath, string filePath)
     {
         NeXASPACPackOptions options = _packOptions ??= new NeXASPACPackOptions();
-        string[] files = Directory.GetFiles(folderPath, "*", SearchOption.TopDirectoryOnly);
+        Encoding sourceScriptEncoding = options.SourceScriptEncoding ?? NeXASEncodings.Default;
+        Encoding translatedScriptEncoding = options.ScriptEncoding ?? NeXASEncodings.Default;
+        string[] files = GetOrderedFiles(folderPath, out Dictionary<string, int> entryIndices);
         if (files.Length == 0 || files.Length >= 0x10000)
         {
             throw new InvalidArchiveException("PAC must contain between 1 and 65535 files.");
@@ -676,6 +765,28 @@ internal class PAC : ArcFormat, IUnpackConfigurable, IPackConfigurable
         {
             string fileName = Path.GetFileName(file);
             byte[] data = File.ReadAllBytes(file);
+
+            string extension = Path.GetExtension(fileName);
+            if (extension.Equals(".bin", StringComparison.OrdinalIgnoreCase)
+                || extension.Equals(".bin2", StringComparison.OrdinalIgnoreCase))
+            {
+                string textPath = entryIndices.TryGetValue(fileName, out int entryIndex)
+                    ? Path.Combine(folderPath, "_text", $"{entryIndex:D4}.txt")
+                    : string.Empty;
+                if (!string.IsNullOrEmpty(textPath) && File.Exists(textPath))
+                {
+                    data = NeXASScriptWriter.ApplyTranslation(
+                        data,
+                        textPath,
+                        sourceScriptEncoding,
+                        translatedScriptEncoding,
+                        out int changedSegments,
+                        out int totalSegments);
+                    Logger.Info("Translation applied: {0} ({1}/{2} text segments changed).",
+                        fileName, changedSegments, totalSegments);
+                }
+            }
+
             uint unpackedSize = checked((uint)data.Length);
 
             if (!fileName.HasAnyOfExtensions(NoCompressionExts))
@@ -742,12 +853,14 @@ internal static class NeXASEncodings
 {
     public static readonly IReadOnlyList<Encoding> Supported;
     public static readonly Encoding Default;
+    public static readonly Encoding Chinese;
 
     static NeXASEncodings()
     {
         Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
         Encoding shiftJis = Encoding.GetEncoding(932);
-        Supported = [shiftJis, Encoding.GetEncoding(936), Encoding.GetEncoding(950), Encoding.UTF8];
+        Chinese = Encoding.GetEncoding(936);
+        Supported = [shiftJis, Chinese, Encoding.GetEncoding(950), Encoding.UTF8];
         Default = shiftJis;
     }
 }
@@ -757,8 +870,13 @@ internal partial class NeXASPACUnpackOptions : ArcOptions
     [ObservableProperty]
     public partial IReadOnlyList<Encoding> Encodings { get; set; } = NeXASEncodings.Supported;
 
+    // Encoding of PAC entry names in the index.
     [ObservableProperty]
     public partial Encoding Encoding { get; set; } = NeXASEncodings.Default;
+
+    // Encoding used to decode script segments into the UTF-8 text files.
+    [ObservableProperty]
+    public partial Encoding ScriptEncoding { get; set; } = NeXASEncodings.Default;
 }
 
 internal partial class NeXASPACPackOptions : ArcOptions
@@ -766,8 +884,17 @@ internal partial class NeXASPACPackOptions : ArcOptions
     [ObservableProperty]
     public partial IReadOnlyList<Encoding> Encodings { get; set; } = NeXASEncodings.Supported;
 
+    // Encoding of entry names written into the PAC index.
     [ObservableProperty]
     public partial Encoding Encoding { get; set; } = NeXASEncodings.Default;
+
+    // Encoding used to decode the target BIN before comparing it with its TXT file.
+    [ObservableProperty]
+    public partial Encoding SourceScriptEncoding { get; set; } = NeXASEncodings.Default;
+
+    // Encoding used for changed translation lines written back into BIN files.
+    [ObservableProperty]
+    public partial Encoding ScriptEncoding { get; set; } = NeXASEncodings.Chinese;
 
     [ObservableProperty]
     public partial int Version { get; set; } = 2;
@@ -775,6 +902,7 @@ internal partial class NeXASPACPackOptions : ArcOptions
     [ObservableProperty]
     public partial IReadOnlyList<int> Versions { get; set; } = [1, 2];
 
+    // The supplied CNScript/JPScript samples use Zstandard method 7.
     [ObservableProperty]
-    public partial PAC.Method Method { get; set; } = PAC.Method.None;
+    public partial PAC.Method Method { get; set; } = PAC.Method.Zstd;
 }

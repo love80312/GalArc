@@ -1,96 +1,164 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.IO;
 using System.Text;
 
 namespace GalArc.Models.Formats.NeXAS;
 
 /// <summary>
-/// Reads the NUL-separated text area used by NeXAS compiled script files.
-/// The source binary is never modified. The exporter writes head.bin,
-/// script.txt and tail.bin in a sibling folder.
+/// One NUL-terminated text segment from a compiled NeXAS script.
+/// </summary>
+internal sealed class NeXASScriptSegment
+{
+    public int Index { get; init; }
+    public byte[] OriginalBytes { get; init; }
+    public int FollowingNulls { get; init; }
+    public bool IsNotText { get; init; }
+    public string Text { get; init; }
+}
+
+/// <summary>
+/// Parsed layout of a compiled NeXAS script.
+/// The header and footer are retained byte-for-byte from the source BIN.
+/// </summary>
+internal sealed class NeXASScriptDocument
+{
+    public int FirstTextOffset { get; init; }
+    public int TailOffset { get; init; }
+    public IReadOnlyList<NeXASScriptSegment> Segments { get; init; }
+}
+
+/// <summary>
+/// Extracts the NUL-separated text area from supported NeXAS compiled scripts.
+/// TXT files are plain UTF-8, one segment per line, stored in the PAC output's _text folder.
 /// </summary>
 internal static class NeXASScriptReader
 {
-    private sealed class ScriptSegment
-    {
-        public int Index { get; init; }
-        public int RawLength { get; init; }
-        public int FollowingNulls { get; init; }
-        public bool IsNotText { get; init; }
-        public string Text { get; init; }
-    }
+    private static readonly UTF8Encoding Utf8NoBom = new(false, true);
 
-    /// <summary>
-    /// Attempts to parse and export a compiled NeXAS script.
-    /// Returns false when the input does not match the script layout.
-    /// </summary>
     public static bool TryExtract(
         byte[] data,
-        string outputDirectory,
+        string textFilePath,
         Encoding textEncoding,
         out int segmentCount)
     {
+        return TryExtract(data, textFilePath, textEncoding, out segmentCount, out _);
+    }
+
+    public static bool TryExtract(
+        byte[] data,
+        string textFilePath,
+        Encoding textEncoding,
+        out int segmentCount,
+        out string reason)
+    {
         segmentCount = 0;
-        if (data == null || data.Length < 16 || textEncoding == null)
+        if (!TryParse(data, textEncoding, out NeXASScriptDocument document, out reason))
         {
             return false;
         }
 
-        // NeXAS script header: first UInt64 is n; text area starts at (n + 1) * 8.
+        StringBuilder output = new();
+        foreach (NeXASScriptSegment segment in document.Segments)
+        {
+            output.Append(NeXASScriptWriter.EscapeText(segment.Text));
+            output.Append("\r\n");
+        }
+
+        string directory = Path.GetDirectoryName(textFilePath);
+        if (!string.IsNullOrEmpty(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        File.WriteAllText(textFilePath, output.ToString(), Utf8NoBom);
+        segmentCount = document.Segments.Count;
+        return true;
+    }
+
+    internal static bool TryParse(
+        byte[] data,
+        Encoding textEncoding,
+        out NeXASScriptDocument document)
+    {
+        return TryParse(data, textEncoding, out document, out _);
+    }
+
+    internal static bool TryParse(
+        byte[] data,
+        Encoding textEncoding,
+        out NeXASScriptDocument document,
+        out string reason)
+    {
+        document = null;
+        reason = null;
+        if (data == null || data.Length < 16 || textEncoding == null)
+        {
+            reason = "BIN is null, too small, or no text encoding was selected.";
+            return false;
+        }
+
+        // NeXAS compiled script header: the first UInt64 is n;
+        // the NUL-separated text area begins at (n + 1) * 8.
         ulong headerValue = ReadUInt64LittleEndian(data, 0);
         if (headerValue >= (ulong)data.Length / 8)
         {
+            reason = $"Header value {headerValue} points outside the BIN length {data.Length}.";
             return false;
         }
 
         ulong textOffsetValue = (headerValue + 1) * 8;
         if (textOffsetValue >= (ulong)data.Length || textOffsetValue > int.MaxValue)
         {
+            reason = $"Calculated text offset {textOffsetValue} is outside the BIN length {data.Length}.";
             return false;
         }
 
-        int textOffset = (int)textOffsetValue;
-        int firstTextOffset = textOffset;
+        int firstTextOffset = (int)textOffsetValue;
         while (firstTextOffset < data.Length && data[firstTextOffset] == 0)
         {
             firstTextOffset++;
         }
 
-        if (firstTextOffset >= data.Length
-            || data[firstTextOffset] < 0x20
-            || data[firstTextOffset] == 0xFF)
+        if (firstTextOffset >= data.Length || IsFooterByte(data[firstTextOffset]))
         {
+            reason = $"No text segment found at calculated text offset {textOffsetValue}.";
             return false;
         }
 
-        List<ScriptSegment> segments = [];
+        List<NeXASScriptSegment> segments = [];
         int position = firstTextOffset;
+        int tailOffset = data.Length;
+
         while (position < data.Length)
         {
             byte firstByte = data[position];
-            // The compiled script's footer begins with a control byte or 0xFF.
-            if (firstByte < 0x20 || firstByte == 0xFF)
+            if (IsFooterByte(firstByte))
             {
+                tailOffset = position;
                 break;
             }
 
             int terminator = Array.IndexOf(data, (byte)0, position);
             if (terminator < 0)
             {
-                // A text segment without a terminating NUL is not a valid script segment.
+                // A text segment without a terminating NUL is not safe to rewrite.
+                reason = $"Text segment beginning at BIN offset {position} has no NUL terminator.";
                 return false;
             }
 
             int rawLength = terminator - position;
             if (rawLength <= 0)
             {
-                break;
+                reason = $"Empty text segment found at BIN offset {position}.";
+                return false;
             }
 
-            string text = textEncoding.GetString(data, position, rawLength);
-            bool isNotText = IsAsciiDigit(firstByte) || IsAsciiUpper(firstByte)
+            byte[] rawText = new byte[rawLength];
+            Buffer.BlockCopy(data, position, rawText, 0, rawLength);
+            string text = textEncoding.GetString(rawText);
+            bool isNotText = IsAsciiDigit(firstByte)
+                || IsAsciiUpper(firstByte)
                 || text.EndsWith(".bin", StringComparison.OrdinalIgnoreCase);
 
             position = terminator;
@@ -101,10 +169,10 @@ internal static class NeXASScriptReader
                 followingNulls++;
             }
 
-            segments.Add(new ScriptSegment
+            segments.Add(new NeXASScriptSegment
             {
                 Index = segments.Count,
-                RawLength = rawLength,
+                OriginalBytes = rawText,
                 FollowingNulls = followingNulls,
                 IsNotText = isNotText,
                 Text = text
@@ -113,57 +181,25 @@ internal static class NeXASScriptReader
 
         if (segments.Count == 0)
         {
+            reason = "No NUL-separated text segments were found.";
             return false;
         }
 
-        string textFilePath = Path.Combine(outputDirectory, "script.txt");
-        string headFilePath = Path.Combine(outputDirectory, "head.bin");
-        string tailFilePath = Path.Combine(outputDirectory, "tail.bin");
-
-        StringBuilder textOutput = new();
-        textOutput.Append("ZBSPAC-TRANSLATION ENCODING ")
-            .Append(GetZbspacEncodingName(textEncoding))
-            .Append(" COUNT ")
-            .Append(segments.Count.ToString("D5", CultureInfo.InvariantCulture))
-            .Append("\r\n\r\n");
-
-        foreach (ScriptSegment segment in segments)
+        document = new NeXASScriptDocument
         {
-            textOutput.Append("SEG ")
-                .Append(segment.Index.ToString(CultureInfo.InvariantCulture))
-                .Append(" NULL ")
-                .Append(segment.FollowingNulls.ToString(CultureInfo.InvariantCulture));
-
-            if (segment.IsNotText)
-            {
-                textOutput.Append(" NOT-TEXT");
-            }
-
-            textOutput.Append("\r\n")
-                .Append(segment.Text).Append("\r\n")
-                .Append('-', segment.RawLength).Append("\r\n")
-                .Append(segment.Text).Append("\r\n\r\n");
-        }
-
-        // head.bin contains all bytes before the first text segment;
-        // tail.bin preserves the binary footer after the last text segment.
-        byte[] head = new byte[firstTextOffset];
-        Buffer.BlockCopy(data, 0, head, 0, head.Length);
-
-        int tailLength = data.Length - position;
-        byte[] tail = new byte[tailLength];
-        if (tailLength > 0)
-        {
-            Buffer.BlockCopy(data, position, tail, 0, tailLength);
-        }
-
-        Directory.CreateDirectory(outputDirectory);
-        File.WriteAllBytes(headFilePath, head);
-        File.WriteAllText(textFilePath, textOutput.ToString(), Encoding.Unicode);
-        File.WriteAllBytes(tailFilePath, tail);
-
-        segmentCount = segments.Count;
+            FirstTextOffset = firstTextOffset,
+            TailOffset = tailOffset,
+            Segments = segments
+        };
+        reason = $"Parsed {segments.Count} text segments.";
         return true;
+    }
+
+    private static bool IsFooterByte(byte value)
+    {
+        // The original NeXAS script layout terminates its text section
+        // when a segment would begin with a control byte or 0xFF.
+        return value < 0x20 || value == 0xFF;
     }
 
     private static ulong ReadUInt64LittleEndian(byte[] data, int offset)
@@ -181,15 +217,4 @@ internal static class NeXASScriptReader
     private static bool IsAsciiDigit(byte value) => value >= (byte)'0' && value <= (byte)'9';
 
     private static bool IsAsciiUpper(byte value) => value >= (byte)'A' && value <= (byte)'Z';
-
-    private static string GetZbspacEncodingName(Encoding encoding)
-    {
-        return encoding.CodePage switch
-        {
-            932 => "japanese",
-            936 or 950 => "chinese",
-            949 => "korean",
-            _ => encoding.WebName
-        };
-    }
 }

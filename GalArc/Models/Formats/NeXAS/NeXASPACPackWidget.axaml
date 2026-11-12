@@ -15,7 +15,7 @@
     </Design.DataContext>
 
     <StackPanel Spacing="10">
-        <TextBlock Text="{x:Static i:GuiStrings.Encoding}" />
+        <TextBlock Text="檔名編碼" />
         <ComboBox HorizontalAlignment="Stretch"
                   ItemsSource="{Binding Encodings}"
                   SelectedItem="{Binding Encoding}">
@@ -25,6 +25,29 @@
                 </DataTemplate>
             </ComboBox.ItemTemplate>
         </ComboBox>
+
+        <TextBlock Text="原始 BIN 文字編碼" />
+        <ComboBox HorizontalAlignment="Stretch"
+                  ItemsSource="{Binding Encodings}"
+                  SelectedItem="{Binding SourceScriptEncoding}">
+            <ComboBox.ItemTemplate>
+                <DataTemplate>
+                    <TextBlock Text="{Binding EncodingName}" />
+                </DataTemplate>
+            </ComboBox.ItemTemplate>
+        </ComboBox>
+
+        <TextBlock Text="翻譯文字輸出編碼" />
+        <ComboBox HorizontalAlignment="Stretch"
+                  ItemsSource="{Binding Encodings}"
+                  SelectedItem="{Binding ScriptEncoding}">
+            <ComboBox.ItemTemplate>
+                <DataTemplate>
+                    <TextBlock Text="{Binding EncodingName}" />
+                </DataTemplate>
+            </ComboBox.ItemTemplate>
+        </ComboBox>
+
         <TextBlock Text="{x:Static i:GuiStrings.Version}" />
         <ComboBox HorizontalAlignment="Stretch"
                   ItemsSource="{Binding Versions}"
