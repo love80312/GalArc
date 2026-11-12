@@ -1,3 +1,4 @@
+
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -53,16 +54,17 @@ internal sealed class NeXASScriptDocument
 /// the NUL-separated text table used by zbspac and the BINv2 structure
 /// (version byte + VM array + three counted CString arrays).
 ///
-/// Each string is decoded independently. This is necessary because some
-/// NeXAS BIN files contain both CP932 Japanese strings and CP936/GBK
-/// Simplified Chinese strings in the same string table.
+/// Each string is decoded independently. This supports mixed CP932 Japanese,
+/// CP936/GBK Simplified Chinese, and UTF-8 text in the same string table.
 /// </summary>
 internal static class NeXASScriptReader
 {
     private const uint MaxArrayCount = 1_000_000;
     private const int BinV2HeaderSize = 8;
     private const int BinV2MinimumVmCount = 3;
+
     private static readonly UTF8Encoding Utf8NoBom = new(false, true);
+    private static readonly Encoding Utf8Strict = new UTF8Encoding(false, true);
 
     private static readonly Encoding ShiftJisStrict;
     private static readonly Encoding GbkStrict;
@@ -73,7 +75,16 @@ internal static class NeXASScriptReader
     private const string SimplifiedChineseIndicators =
         "这说时发后还为们过将实开关经间现样吗问让给没听长东书车气语图动进业头务认总见处变边队风报备难乐归办权护层宽专领产轻许标统线观调齐帮广忆买卖厂联欢岁员习马龙县丰义乌仓仪价优伟伤伪俩俭偿兰兴养冈册农冯冻净凤凭凯击刘创删剂剑剧劝协卫历厌叠启团围圆场坏块坛坝坟垄垒墙壳夺奋奖妆妇妈孙宁宠宪宾寻导尘岗岛岭币帐带庆库应庙废异弃张弯录彻忧怀态惊惧惩惫惭惯愤戏战户扩扫扬扰抚拟拢拥拦拨择挠挡挣挤挥捞损捡换捣掷揽搀搁搂搅摄摆摊撑撵撷撸撺攒敛斩旷显晓晕暂杂权杨极构枪枫柜标栈栋栏树桥桨检欢歼毁毕毙汉汤沟沥沦沪泞泪泷泸泻泼泽洁浆浇浊济浑浓涛涝润涨涩淀渔渗溃溅滚满滤滥滨滩灭灵灾炼烁烂烦烧焕爱爷牵牺犊狮狱猎玛环电畅疗疯皑皱盏盐监盘睁瞒矫矿码砖砚础硕确碍祸离秃穷窜窝窍竖竞笋筛筝筹签篮粪粮紧纠纪红纤约级纯纱纲纳纵纷纸纹纺纽线练组织终绍绎经绑绒结绕绘络绝绞统绣继绩绪续绫绰绳维绵绸综绽绿罗罚罢耻联聪肃肠肤肾肿胀胜胶脉脏脑脸腾舰舱艰艳艺芜苍苏药莲获营萤萧萨蒋蓝蔷蕴虏虑蚀蚁蚂蜡蝇衅补裤觅视览觉订认让讯记讲讳讶许讹讼讽设访诀证评诅识诈诉词译诚诛诞诡询诧诫诬误诱诲诺读谅谋谍谎谐谓谚谜谢谣谤谦谱谩谬谭谲谴贝贞负贡财责贤败账货贩贪贫贬购贮贯贱贴贸费贺贼贾贿赁赂赃资赅赈赊赋赌赎赏赐赔赖赚赛赞赠赢赵赶趋跃践蹿躏车轨轩转轮软轰轴载较辆辈辉辊辑输辖辗辽达迁迈远违连迟适选遗邮邻郑酝酱醋酿释钟钢钦钧钩钮钱钳钻钾铁铃铅铜铝铭铲银铸铺链销锁锅锈锋锐错锡锤锦键锯镇镜门闪闭问闯闲间闷闹闸闻阅阀阎阐阔队阳阴阵际陆陈险随隐难韦页顶项顺须顾顿颁颂预颅领颇颈频颖颗题颜额风飞饭饮饰饱饲饵饶饺饼饿馋馆馈馅马驭驮驯驰驱驳驴驶驻驼驾骂骄骆骇验骏骑骗骚鲁鲜鲤鱼鸟鸣鸥鸦鸭鸯鸳鹅鹏鹤鹰麦齐齿龄龙龟";
 
-    private static readonly HashSet<char> SimplifiedChineseIndicatorSet = new(SimplifiedChineseIndicators);
+    private static readonly HashSet<char> SimplifiedChineseIndicatorSet =
+        new(SimplifiedChineseIndicators);
+
+    // Traditional Chinese characters that are uncommon in Japanese text.
+    // They help distinguish UTF-8 Traditional Chinese from CP932/GBK mojibake.
+    private const string TraditionalChineseIndicators =
+        "這說時發後還為們過將實開關經間現樣嗎問讓給沒聽長東書車氣語圖動進業頭務認總見處變邊隊風報備難樂歸辦權護層寬專領產輕許標統線觀調齊幫廣憶買賣廠聯歡歲員馬龍縣豐義烏倉儀價優偉傷偽倆儉償蘭興養冊農馮凍淨鳳憑凱擊劉創刪劑劍劇勸協衛歷厭疊啟團圍圓場壞塊壇壩墳壟壘牆殼奪奮獎妝婦媽孫寧寵憲賓尋導塵崗島嶺幣帳帶慶庫應廟廢異棄張彎錄徹憂懷態驚懲憤戲戰戶擴掃揚擾撫擬攏擁攔撥擇撓擋掙擠揮撈損撿換搗擲攬擱攪攝擺攤撐斂斬曠顯曉暈暫雜楊極構槍楓櫃標棧棟欄樹橋槳檢歡殲毀畢斃漢湯溝瀝淪滬淚瀧瀘瀉潑澤潔漿澆濁濟渾濃濤澇潤漲澀澱漁滲潰濺滾滿濾濫濱灘滅靈災煉爍爛煩燒煥愛爺牽犧犢獅獄獵瑪環電暢療瘋皚皺盞鹽監盤瞞矯礦碼磚硯礎碩確礙禍離禿窮窩竅豎競筍篩箏籌籤籃糞糧緊糾紀紅纖約級純紗綱納縱紛紙紋紡紐線練組織終紹繹經綁絨結繞繪絡絕絞統繡繼績緒續綾綽繩維綿綢綜綻綠羅罰罷恥聯聰肅腸膚腎腫脹勝膠脈臟腦臉騰艦艙艱艷藝蕪蒼蘇藥蓮獲營螢蕭薩蔣藍薔蘊虜慮蝕蟻蠟蠅釁補褲覓視覽覺訂認讓訊記講諱訝許訛訟諷設訪訣證評詛識詐訴詞譯誠誅誕詭詢詫誡誣誤誘誨諾讀諒謀諜謊諧謂諺謎謝謠謗謙譜謾謬譚譎譴貝貞負貢財責賢敗帳貨販貪貧貶購貯貫賤貼貿費賀賊賈賄賃賂贓資賅賑賒賦賭贖賞賜賠賴賺賽贊贈贏趙趕趨躍踐躥躪車軌軒轉輪軟轟軸載較輛輩輝輥輯輸轄輾遼達遷邁遠違連遲適選遺郵鄰鄭醞醬醋釀釋鐘鋼欽鈞鉤鈕錢鉗鑽鉀鐵鈴鉛銅鋁銘鏟銀鑄鋪鏈銷鎖鍋鏽鋒銳錯錫錘錦鍵鋸鎮鏡門閃閉問闖閒間悶鬧閘聞閱閥閻闡闊隊陽陰陣際陸陳險隨隱難韋頁頂項順須顧頓頒頌預顱領頗頸頻穎顆題顏額風飛飯飲飾飽飼餌饒餃餅餓饞館饋餡馬馭馱馴馳驅駁驢駛駐駝駕罵驕駱駭驗駿騎騙騷魯鮮鯉魚鳥鳴鷗鴉鴨鴦鴛鵝鵬鶴鷹麥齊齒齡龍龜誰謝體國學對單當點萬無聲廣轉換應該機畫傳說親園總變價讀寫資料檔案畫面";
+
+    private static readonly HashSet<char> TraditionalChineseIndicatorSet =
+        new(TraditionalChineseIndicators);
 
     private static readonly string[] CommonSimplifiedChinesePhrases =
     [
@@ -86,6 +97,16 @@ internal static class NeXASScriptReader
         "怎么", "以后", "简体中文", "简体", "当前", "继续进行", "重新启动", "测试",
         "测试文本", "对话", "剧情", "菜单", "按钮", "读取中", "加载中", "正在加载",
         "游戏开始", "开始游戏", "退出游戏", "游戏结束", "重新开始", "无法继续", "设置完成"
+    ];
+
+    private static readonly string[] CommonTraditionalChinesePhrases =
+    [
+        "你好", "謝謝", "對不起", "沒關係", "為什麼", "怎麼了", "是這樣嗎",
+        "我不知道", "我知道", "可以嗎", "不可以", "沒問題", "不要緊", "真的嗎",
+        "你在做什麼", "你是誰", "你知道嗎", "我很好", "我愛你", "我想回家",
+        "歡迎", "遊戲", "對話", "這裡", "現在", "我們", "你們", "開始", "結束",
+        "繼續", "退出", "選擇", "設定", "讀取", "儲存", "確認", "取消",
+        "檔案", "畫面", "聲音", "繁體中文"
     ];
 
     static NeXASScriptReader()
@@ -521,9 +542,9 @@ internal static class NeXASScriptReader
     }
 
     /// <summary>
-    /// Decodes one string as CP932 or CP936 when there is a clear script
-    /// signature. The selected encoding remains the fallback for ambiguous
-    /// strings and for other configured encodings.
+    /// Decodes one string independently as CP932, CP936, or UTF-8.
+    /// Strong script-specific evidence takes priority; the selected encoding
+    /// is used as the fallback for ambiguous strings.
     /// </summary>
     private static string DecodeText(byte[] bytes, Encoding preferredEncoding)
     {
@@ -533,42 +554,104 @@ internal static class NeXASScriptReader
         }
 
         int preferredCodePage = preferredEncoding.CodePage;
-        if (preferredCodePage != 932 && preferredCodePage != 936)
+        if (preferredCodePage != 932
+            && preferredCodePage != 936
+            && preferredCodePage != 65001)
         {
             return preferredEncoding.GetString(bytes);
         }
 
         bool hasShiftJis = TryDecodeStrict(ShiftJisStrict, bytes, out string shiftJisText);
         bool hasGbk = TryDecodeStrict(GbkStrict, bytes, out string gbkText);
+        bool hasUtf8 = TryDecodeStrict(Utf8Strict, bytes, out string utf8Text);
 
-        if (hasShiftJis && !hasGbk)
+        int validEncodingCount = (hasShiftJis ? 1 : 0)
+            + (hasGbk ? 1 : 0)
+            + (hasUtf8 ? 1 : 0);
+
+        // When only one decoder accepts the byte sequence, use that decoder.
+        if (validEncodingCount == 1)
+        {
+            if (hasShiftJis)
+            {
+                return shiftJisText;
+            }
+            if (hasGbk)
+            {
+                return gbkText;
+            }
+            return utf8Text;
+        }
+
+        int japaneseScore = hasShiftJis ? GetJapaneseScore(shiftJisText) : -1;
+        int chineseScore = hasGbk ? GetSimplifiedChineseScore(gbkText) : -1;
+
+        int utf8Score = -1;
+        if (hasUtf8)
+        {
+            int utf8JapaneseScore = GetJapaneseScore(utf8Text);
+            int utf8SimplifiedScore = GetSimplifiedChineseScore(utf8Text);
+            int utf8TraditionalScore = GetTraditionalChineseScore(utf8Text);
+
+            utf8Score = Math.Max(
+                utf8JapaneseScore,
+                Math.Max(utf8SimplifiedScore, utf8TraditionalScore));
+        }
+
+        // Keep the original CP932/CP936 detection behavior, but compare the
+        // UTF-8 candidate as well so mixed-encoding script tables are handled.
+        if (hasShiftJis
+            && japaneseScore >= 10
+            && japaneseScore >= Math.Max(chineseScore, utf8Score) + 3)
         {
             return shiftJisText;
         }
-        if (hasGbk && !hasShiftJis)
+
+        if (hasGbk
+            && chineseScore >= 8
+            && chineseScore >= Math.Max(japaneseScore, utf8Score) + 3)
         {
             return gbkText;
         }
-        if (!hasShiftJis && !hasGbk)
+
+        if (hasUtf8
+            && utf8Score >= 8
+            && utf8Score >= Math.Max(japaneseScore, chineseScore) + 3)
         {
-            return preferredEncoding.GetString(bytes);
+            return utf8Text;
         }
 
-        int japaneseScore = GetJapaneseScore(shiftJisText);
-        int chineseScore = GetSimplifiedChineseScore(gbkText);
-
-        // Require a meaningful gap. When the evidence is weak, preserve the
-        // user's selected code page instead of making an unsafe guess.
-        if (japaneseScore >= 10 && japaneseScore >= chineseScore + 3)
+        // For ambiguous strings, preserve the selected encoding.
+        if (preferredCodePage == 932 && hasShiftJis)
         {
             return shiftJisText;
         }
-        if (chineseScore >= 8 && chineseScore >= japaneseScore + 3)
+        if (preferredCodePage == 936 && hasGbk)
         {
             return gbkText;
         }
+        if (preferredCodePage == 65001 && hasUtf8)
+        {
+            return utf8Text;
+        }
 
-        return preferredCodePage == 932 ? shiftJisText : gbkText;
+        // If UTF-8 was selected but the bytes are not valid UTF-8, the source
+        // NeXAS script is most commonly CP932. Try CP932 before falling back
+        // to GBK. This also preserves kanji-only Japanese strings that have
+        // too little kana to trigger the Japanese scoring threshold.
+        if (preferredCodePage == 65001)
+        {
+            if (hasShiftJis)
+            {
+                return shiftJisText;
+            }
+            if (hasGbk)
+            {
+                return gbkText;
+            }
+        }
+
+        return preferredEncoding.GetString(bytes);
     }
 
     private static int GetJapaneseScore(string value)
@@ -636,6 +719,51 @@ internal static class NeXASScriptReader
         return score + phraseScore;
     }
 
+    private static int GetTraditionalChineseScore(string value)
+    {
+        int indicatorCount = 0;
+        int cjkCount = 0;
+
+        foreach (char character in value)
+        {
+            if (IsCjkCharacter(character))
+            {
+                cjkCount++;
+            }
+            if (TraditionalChineseIndicatorSet.Contains(character))
+            {
+                indicatorCount++;
+            }
+        }
+
+        int phraseScore = 0;
+        foreach (string phrase in CommonTraditionalChinesePhrases)
+        {
+            if (value.Contains(phrase, StringComparison.Ordinal))
+            {
+                phraseScore += 10;
+            }
+        }
+
+        if (indicatorCount == 0)
+        {
+            return phraseScore;
+        }
+
+        int score = indicatorCount * 4;
+        double indicatorRatio = indicatorCount / (double)Math.Max(1, cjkCount);
+        if (indicatorCount >= 2)
+        {
+            score += 4;
+        }
+        else if (indicatorRatio >= 0.15)
+        {
+            score += 4;
+        }
+
+        return score + phraseScore;
+    }
+
     private static int CountFullWidthJapaneseKana(string value)
     {
         int count = 0;
@@ -664,6 +792,7 @@ internal static class NeXASScriptReader
                 count++;
             }
         }
+
         return count;
     }
 
